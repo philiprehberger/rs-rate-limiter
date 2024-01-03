@@ -1,0 +1,10 @@
+[package]
+name = "philiprehberger-rate-limiter"
+version = "0.1.0"
+edition = "2021"
+authors = ["Philip Rehberger"]
+description = "Token bucket, sliding window, and fixed window rate limiting"
+license = "MIT"
+repository = "https://github.com/philiprehberger/rs-rate-limiter"
+keywords = ["rate-limit", "throttle", "token-bucket", "api", "middleware"]
+categories = ["algorithms", "web-programming"]
