@@ -10,7 +10,7 @@ Token bucket, sliding window, and fixed window rate limiting.
 
 ```toml
 [dependencies]
-philiprehberger-rate-limiter = "0.1"
+philiprehberger-rate-limiter = "0.1.6"
 ```
 
 ## Usage
