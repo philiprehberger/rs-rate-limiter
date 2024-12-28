@@ -10,7 +10,7 @@ Token bucket, sliding window, and fixed window rate limiting.
 
 ```toml
 [dependencies]
-philiprehberger-rate-limiter = "0.1.6"
+philiprehberger-rate-limiter = "0.1.7"
 ```
 
 ## Usage
@@ -57,6 +57,14 @@ let decision = limiter.check("api-key");
 | `TokenBucket::new(capacity, refill_rate)` | Token bucket limiter (tokens/sec) |
 | `SlidingWindow::new(window, max_requests)` | Sliding window counter |
 | `FixedWindow::new(window, max_requests)` | Fixed window counter |
+
+
+## Development
+
+```bash
+cargo test
+cargo clippy -- -D warnings
+```
 
 ## License
 
