@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0
+## 0.2.0 (2026-03-17)
 
 - Add `RateLimiterStats` struct for observability (`stats()` method on all limiters)
 - Add `reset_key(key)` to clear rate limit state for a specific key
