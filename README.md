@@ -3,6 +3,7 @@
 [![CI](https://github.com/philiprehberger/rs-rate-limiter/actions/workflows/ci.yml/badge.svg)](https://github.com/philiprehberger/rs-rate-limiter/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/philiprehberger-rate-limiter.svg)](https://crates.io/crates/philiprehberger-rate-limiter)
 [![License](https://img.shields.io/github/license/philiprehberger/rs-rate-limiter)](LICENSE)
+[![Sponsor](https://img.shields.io/badge/sponsor-GitHub%20Sponsors-ec6cb9)](https://github.com/sponsors/philiprehberger)
 
 Token bucket, sliding window, and fixed window rate limiting
 
