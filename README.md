@@ -2,7 +2,11 @@
 
 [![CI](https://github.com/philiprehberger/rs-rate-limiter/actions/workflows/ci.yml/badge.svg)](https://github.com/philiprehberger/rs-rate-limiter/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/philiprehberger-rate-limiter.svg)](https://crates.io/crates/philiprehberger-rate-limiter)
+[![GitHub release](https://img.shields.io/github/v/release/philiprehberger/rs-rate-limiter)](https://github.com/philiprehberger/rs-rate-limiter/releases)
+[![Last updated](https://img.shields.io/github/last-commit/philiprehberger/rs-rate-limiter)](https://github.com/philiprehberger/rs-rate-limiter/commits/main)
 [![License](https://img.shields.io/github/license/philiprehberger/rs-rate-limiter)](LICENSE)
+[![Bug Reports](https://img.shields.io/github/issues/philiprehberger/rs-rate-limiter/bug)](https://github.com/philiprehberger/rs-rate-limiter/issues?q=is%3Aissue+is%3Aopen+label%3Abug)
+[![Feature Requests](https://img.shields.io/github/issues/philiprehberger/rs-rate-limiter/enhancement)](https://github.com/philiprehberger/rs-rate-limiter/issues?q=is%3Aissue+is%3Aopen+label%3Aenhancement)
 [![Sponsor](https://img.shields.io/badge/sponsor-GitHub%20Sponsors-ec6cb9)](https://github.com/sponsors/philiprehberger)
 
 Token bucket, sliding window, and fixed window rate limiting
@@ -11,7 +15,7 @@ Token bucket, sliding window, and fixed window rate limiting
 
 ```toml
 [dependencies]
-philiprehberger-rate-limiter = "0.2.1"
+philiprehberger-rate-limiter = "0.2.2"
 ```
 
 ## Usage
@@ -105,6 +109,13 @@ cargo test
 cargo clippy -- -D warnings
 ```
 
+## Support
+
+If you find this package useful, consider giving it a star on GitHub — it helps motivate continued maintenance and development.
+
+[![LinkedIn](https://img.shields.io/badge/Philip%20Rehberger-LinkedIn-0A66C2?logo=linkedin)](https://www.linkedin.com/in/philiprehberger)
+[![More packages](https://img.shields.io/badge/more-open%20source%20packages-blue)](https://philiprehberger.com/open-source-packages)
+
 ## License
 
-MIT
+[MIT](LICENSE)
