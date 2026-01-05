@@ -1,6 +1,6 @@
 [package]
 name = "philiprehberger-rate-limiter"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 authors = ["Philip Rehberger"]
 description = "Token bucket, sliding window, and fixed window rate limiting"

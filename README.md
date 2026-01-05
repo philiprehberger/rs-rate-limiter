@@ -2,12 +2,7 @@
 
 [![CI](https://github.com/philiprehberger/rs-rate-limiter/actions/workflows/ci.yml/badge.svg)](https://github.com/philiprehberger/rs-rate-limiter/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/philiprehberger-rate-limiter.svg)](https://crates.io/crates/philiprehberger-rate-limiter)
-[![GitHub release](https://img.shields.io/github/v/release/philiprehberger/rs-rate-limiter)](https://github.com/philiprehberger/rs-rate-limiter/releases)
 [![Last updated](https://img.shields.io/github/last-commit/philiprehberger/rs-rate-limiter)](https://github.com/philiprehberger/rs-rate-limiter/commits/main)
-[![License](https://img.shields.io/github/license/philiprehberger/rs-rate-limiter)](LICENSE)
-[![Bug Reports](https://img.shields.io/github/issues/philiprehberger/rs-rate-limiter/bug)](https://github.com/philiprehberger/rs-rate-limiter/issues?q=is%3Aissue+is%3Aopen+label%3Abug)
-[![Feature Requests](https://img.shields.io/github/issues/philiprehberger/rs-rate-limiter/enhancement)](https://github.com/philiprehberger/rs-rate-limiter/issues?q=is%3Aissue+is%3Aopen+label%3Aenhancement)
-[![Sponsor](https://img.shields.io/badge/sponsor-GitHub%20Sponsors-ec6cb9)](https://github.com/sponsors/philiprehberger)
 
 Token bucket, sliding window, and fixed window rate limiting
 
@@ -101,7 +96,6 @@ let removed = limiter.cleanup_inactive(Duration::from_secs(600));
 | `.reset_key(key)` | Clears state for a key, returns `true` if it existed |
 | `.cleanup_inactive(max_age)` | Removes stale keys, returns count removed |
 
-
 ## Development
 
 ```bash
@@ -111,10 +105,21 @@ cargo clippy -- -D warnings
 
 ## Support
 
-If you find this package useful, consider giving it a star on GitHub — it helps motivate continued maintenance and development.
+If you find this project useful:
 
-[![LinkedIn](https://img.shields.io/badge/Philip%20Rehberger-LinkedIn-0A66C2?logo=linkedin)](https://www.linkedin.com/in/philiprehberger)
-[![More packages](https://img.shields.io/badge/more-open%20source%20packages-blue)](https://philiprehberger.com/open-source-packages)
+⭐ [Star the repo](https://github.com/philiprehberger/rs-rate-limiter)
+
+🐛 [Report issues](https://github.com/philiprehberger/rs-rate-limiter/issues?q=is%3Aissue+is%3Aopen+label%3Abug)
+
+💡 [Suggest features](https://github.com/philiprehberger/rs-rate-limiter/issues?q=is%3Aissue+is%3Aopen+label%3Aenhancement)
+
+❤️ [Sponsor development](https://github.com/sponsors/philiprehberger)
+
+🌐 [All Open Source Projects](https://philiprehberger.com/open-source-packages)
+
+💻 [GitHub Profile](https://github.com/philiprehberger)
+
+🔗 [LinkedIn Profile](https://www.linkedin.com/in/philiprehberger)
 
 ## License
 
