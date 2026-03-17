@@ -20,8 +20,22 @@
 //! ```
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// Observability statistics for a rate limiter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RateLimiterStats {
+    /// Total number of `check` calls made.
+    pub total_requests: u64,
+    /// Number of requests that were allowed.
+    pub allowed: u64,
+    /// Number of requests that were denied.
+    pub denied: u64,
+    /// Number of keys currently tracked.
+    pub active_keys: usize,
+}
 
 /// The result of a rate limit check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +66,7 @@ pub trait RateLimiter: Send + Sync {
 struct BucketState {
     tokens: f64,
     last_refill: Instant,
+    last_accessed: Instant,
 }
 
 /// A token bucket rate limiter.
@@ -72,6 +87,9 @@ pub struct TokenBucket {
     capacity: u32,
     refill_rate: f64,
     state: Mutex<HashMap<String, BucketState>>,
+    total_requests: AtomicU64,
+    allowed: AtomicU64,
+    denied: AtomicU64,
 }
 
 impl TokenBucket {
@@ -84,7 +102,38 @@ impl TokenBucket {
             capacity,
             refill_rate,
             state: Mutex::new(HashMap::new()),
+            total_requests: AtomicU64::new(0),
+            allowed: AtomicU64::new(0),
+            denied: AtomicU64::new(0),
         }
+    }
+
+    /// Returns observability statistics for this limiter.
+    pub fn stats(&self) -> RateLimiterStats {
+        let map = self.state.lock().unwrap();
+        RateLimiterStats {
+            total_requests: self.total_requests.load(Ordering::Relaxed),
+            allowed: self.allowed.load(Ordering::Relaxed),
+            denied: self.denied.load(Ordering::Relaxed),
+            active_keys: map.len(),
+        }
+    }
+
+    /// Removes the rate limit state for a specific key. Returns `true` if the
+    /// key existed.
+    pub fn reset_key(&self, key: &str) -> bool {
+        let mut map = self.state.lock().unwrap();
+        map.remove(key).is_some()
+    }
+
+    /// Removes keys that haven't been accessed within the given duration.
+    /// Returns the number of keys removed.
+    pub fn cleanup_inactive(&self, max_age: Duration) -> usize {
+        let mut map = self.state.lock().unwrap();
+        let now = Instant::now();
+        let before = map.len();
+        map.retain(|_, v| now.duration_since(v.last_accessed) < max_age);
+        before - map.len()
     }
 }
 
@@ -97,19 +146,25 @@ impl RateLimiter for TokenBucket {
         let entry = map.entry(key.to_owned()).or_insert(BucketState {
             tokens: cap,
             last_refill: now,
+            last_accessed: now,
         });
 
         // Refill tokens based on elapsed time.
         let elapsed = now.duration_since(entry.last_refill).as_secs_f64();
         entry.tokens = (entry.tokens + elapsed * self.refill_rate).min(cap);
         entry.last_refill = now;
+        entry.last_accessed = now;
+
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
 
         if entry.tokens >= 1.0 {
             entry.tokens -= 1.0;
+            self.allowed.fetch_add(1, Ordering::Relaxed);
             Decision::Allowed
         } else {
             let deficit = 1.0 - entry.tokens;
             let wait_secs = deficit / self.refill_rate;
+            self.denied.fetch_add(1, Ordering::Relaxed);
             Decision::Denied {
                 retry_after: Duration::from_secs_f64(wait_secs),
             }
@@ -123,6 +178,7 @@ impl RateLimiter for TokenBucket {
 
 struct SlidingWindowState {
     timestamps: Vec<Instant>,
+    last_accessed: Instant,
 }
 
 /// A sliding window rate limiter.
@@ -144,6 +200,9 @@ pub struct SlidingWindow {
     window: Duration,
     max_requests: u32,
     state: Mutex<HashMap<String, SlidingWindowState>>,
+    total_requests: AtomicU64,
+    allowed: AtomicU64,
+    denied: AtomicU64,
 }
 
 impl SlidingWindow {
@@ -156,7 +215,38 @@ impl SlidingWindow {
             window,
             max_requests,
             state: Mutex::new(HashMap::new()),
+            total_requests: AtomicU64::new(0),
+            allowed: AtomicU64::new(0),
+            denied: AtomicU64::new(0),
         }
+    }
+
+    /// Returns observability statistics for this limiter.
+    pub fn stats(&self) -> RateLimiterStats {
+        let map = self.state.lock().unwrap();
+        RateLimiterStats {
+            total_requests: self.total_requests.load(Ordering::Relaxed),
+            allowed: self.allowed.load(Ordering::Relaxed),
+            denied: self.denied.load(Ordering::Relaxed),
+            active_keys: map.len(),
+        }
+    }
+
+    /// Removes the rate limit state for a specific key. Returns `true` if the
+    /// key existed.
+    pub fn reset_key(&self, key: &str) -> bool {
+        let mut map = self.state.lock().unwrap();
+        map.remove(key).is_some()
+    }
+
+    /// Removes keys that haven't been accessed within the given duration.
+    /// Returns the number of keys removed.
+    pub fn cleanup_inactive(&self, max_age: Duration) -> usize {
+        let mut map = self.state.lock().unwrap();
+        let now = Instant::now();
+        let before = map.len();
+        map.retain(|_, v| now.duration_since(v.last_accessed) < max_age);
+        before - map.len()
     }
 }
 
@@ -168,18 +258,24 @@ impl RateLimiter for SlidingWindow {
 
         let entry = map.entry(key.to_owned()).or_insert(SlidingWindowState {
             timestamps: Vec::new(),
+            last_accessed: now,
         });
 
         // Remove expired timestamps.
         entry.timestamps.retain(|t| *t > cutoff);
+        entry.last_accessed = now;
+
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
 
         if (entry.timestamps.len() as u32) < self.max_requests {
             entry.timestamps.push(now);
+            self.allowed.fetch_add(1, Ordering::Relaxed);
             Decision::Allowed
         } else {
             // The oldest timestamp in the window determines when a slot opens.
             let oldest = entry.timestamps[0];
             let retry_after = self.window.saturating_sub(now.duration_since(oldest));
+            self.denied.fetch_add(1, Ordering::Relaxed);
             Decision::Denied { retry_after }
         }
     }
@@ -192,6 +288,7 @@ impl RateLimiter for SlidingWindow {
 struct FixedWindowState {
     count: u32,
     window_start: Instant,
+    last_accessed: Instant,
 }
 
 /// A fixed window rate limiter.
@@ -212,6 +309,9 @@ pub struct FixedWindow {
     window: Duration,
     max_requests: u32,
     state: Mutex<HashMap<String, FixedWindowState>>,
+    total_requests: AtomicU64,
+    allowed: AtomicU64,
+    denied: AtomicU64,
 }
 
 impl FixedWindow {
@@ -224,7 +324,38 @@ impl FixedWindow {
             window,
             max_requests,
             state: Mutex::new(HashMap::new()),
+            total_requests: AtomicU64::new(0),
+            allowed: AtomicU64::new(0),
+            denied: AtomicU64::new(0),
         }
+    }
+
+    /// Returns observability statistics for this limiter.
+    pub fn stats(&self) -> RateLimiterStats {
+        let map = self.state.lock().unwrap();
+        RateLimiterStats {
+            total_requests: self.total_requests.load(Ordering::Relaxed),
+            allowed: self.allowed.load(Ordering::Relaxed),
+            denied: self.denied.load(Ordering::Relaxed),
+            active_keys: map.len(),
+        }
+    }
+
+    /// Removes the rate limit state for a specific key. Returns `true` if the
+    /// key existed.
+    pub fn reset_key(&self, key: &str) -> bool {
+        let mut map = self.state.lock().unwrap();
+        map.remove(key).is_some()
+    }
+
+    /// Removes keys that haven't been accessed within the given duration.
+    /// Returns the number of keys removed.
+    pub fn cleanup_inactive(&self, max_age: Duration) -> usize {
+        let mut map = self.state.lock().unwrap();
+        let now = Instant::now();
+        let before = map.len();
+        map.retain(|_, v| now.duration_since(v.last_accessed) < max_age);
+        before - map.len()
     }
 }
 
@@ -236,6 +367,7 @@ impl RateLimiter for FixedWindow {
         let entry = map.entry(key.to_owned()).or_insert(FixedWindowState {
             count: 0,
             window_start: now,
+            last_accessed: now,
         });
 
         // Reset counter if the window has expired.
@@ -244,12 +376,17 @@ impl RateLimiter for FixedWindow {
             entry.window_start = now;
         }
 
+        entry.last_accessed = now;
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
+
         if entry.count < self.max_requests {
             entry.count += 1;
+            self.allowed.fetch_add(1, Ordering::Relaxed);
             Decision::Allowed
         } else {
             let elapsed = now.duration_since(entry.window_start);
             let retry_after = self.window.saturating_sub(elapsed);
+            self.denied.fetch_add(1, Ordering::Relaxed);
             Decision::Denied { retry_after }
         }
     }
@@ -412,5 +549,133 @@ mod tests {
         } else {
             panic!("expected Denied");
         }
+    }
+
+    // --- Stats tests ---
+
+    #[test]
+    fn token_bucket_stats_tracks_allowed_and_denied() {
+        let limiter = TokenBucket::new(2, 0.1);
+        limiter.check("a");
+        limiter.check("a");
+        limiter.check("a"); // denied
+        limiter.check("b");
+
+        let s = limiter.stats();
+        assert_eq!(s.total_requests, 4);
+        assert_eq!(s.allowed, 3);
+        assert_eq!(s.denied, 1);
+        assert_eq!(s.active_keys, 2);
+    }
+
+    #[test]
+    fn sliding_window_stats_tracks_allowed_and_denied() {
+        let limiter = SlidingWindow::new(Duration::from_secs(10), 1);
+        limiter.check("a");
+        limiter.check("a"); // denied
+
+        let s = limiter.stats();
+        assert_eq!(s.total_requests, 2);
+        assert_eq!(s.allowed, 1);
+        assert_eq!(s.denied, 1);
+        assert_eq!(s.active_keys, 1);
+    }
+
+    #[test]
+    fn fixed_window_stats_tracks_allowed_and_denied() {
+        let limiter = FixedWindow::new(Duration::from_secs(10), 1);
+        limiter.check("x");
+        limiter.check("x"); // denied
+        limiter.check("y");
+
+        let s = limiter.stats();
+        assert_eq!(s.total_requests, 3);
+        assert_eq!(s.allowed, 2);
+        assert_eq!(s.denied, 1);
+        assert_eq!(s.active_keys, 2);
+    }
+
+    // --- reset_key tests ---
+
+    #[test]
+    fn token_bucket_reset_key_clears_state() {
+        let limiter = TokenBucket::new(1, 0.1);
+        limiter.check("a");
+        assert!(matches!(limiter.check("a"), Decision::Denied { .. }));
+
+        assert!(limiter.reset_key("a"));
+        assert_eq!(limiter.check("a"), Decision::Allowed);
+    }
+
+    #[test]
+    fn token_bucket_reset_key_returns_false_for_missing() {
+        let limiter = TokenBucket::new(1, 1.0);
+        assert!(!limiter.reset_key("nonexistent"));
+    }
+
+    #[test]
+    fn sliding_window_reset_key_clears_state() {
+        let limiter = SlidingWindow::new(Duration::from_secs(10), 1);
+        limiter.check("a");
+        assert!(matches!(limiter.check("a"), Decision::Denied { .. }));
+
+        assert!(limiter.reset_key("a"));
+        assert_eq!(limiter.check("a"), Decision::Allowed);
+    }
+
+    #[test]
+    fn fixed_window_reset_key_clears_state() {
+        let limiter = FixedWindow::new(Duration::from_secs(10), 1);
+        limiter.check("a");
+        assert!(matches!(limiter.check("a"), Decision::Denied { .. }));
+
+        assert!(limiter.reset_key("a"));
+        assert_eq!(limiter.check("a"), Decision::Allowed);
+    }
+
+    // --- cleanup_inactive tests ---
+
+    #[test]
+    fn token_bucket_cleanup_removes_stale_keys() {
+        let limiter = TokenBucket::new(5, 1.0);
+        limiter.check("old");
+        thread::sleep(Duration::from_millis(150));
+        limiter.check("new");
+
+        let removed = limiter.cleanup_inactive(Duration::from_millis(100));
+        assert_eq!(removed, 1);
+        assert_eq!(limiter.stats().active_keys, 1);
+    }
+
+    #[test]
+    fn sliding_window_cleanup_removes_stale_keys() {
+        let limiter = SlidingWindow::new(Duration::from_secs(10), 5);
+        limiter.check("old");
+        thread::sleep(Duration::from_millis(150));
+        limiter.check("new");
+
+        let removed = limiter.cleanup_inactive(Duration::from_millis(100));
+        assert_eq!(removed, 1);
+        assert_eq!(limiter.stats().active_keys, 1);
+    }
+
+    #[test]
+    fn fixed_window_cleanup_removes_stale_keys() {
+        let limiter = FixedWindow::new(Duration::from_secs(10), 5);
+        limiter.check("old");
+        thread::sleep(Duration::from_millis(150));
+        limiter.check("new");
+
+        let removed = limiter.cleanup_inactive(Duration::from_millis(100));
+        assert_eq!(removed, 1);
+        assert_eq!(limiter.stats().active_keys, 1);
+    }
+
+    #[test]
+    fn cleanup_returns_zero_when_nothing_to_remove() {
+        let limiter = TokenBucket::new(5, 1.0);
+        limiter.check("a");
+        let removed = limiter.cleanup_inactive(Duration::from_secs(60));
+        assert_eq!(removed, 0);
     }
 }
