@@ -4,7 +4,7 @@
 [![Crates.io](https://img.shields.io/crates/v/philiprehberger-rate-limiter.svg)](https://crates.io/crates/philiprehberger-rate-limiter)
 [![License](https://img.shields.io/github/license/philiprehberger/rs-rate-limiter)](LICENSE)
 
-Token bucket, sliding window, and fixed window rate limiting.
+Token bucket, sliding window, and fixed window rate limiting
 
 ## Installation
 
