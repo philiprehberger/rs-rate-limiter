@@ -135,6 +135,28 @@ impl TokenBucket {
         map.retain(|_, v| now.duration_since(v.last_accessed) < max_age);
         before - map.len()
     }
+
+    /// Check what `check` would return for `key`, without consuming a token or
+    /// creating per-key state for an unseen key.
+    pub fn peek(&self, key: &str) -> Decision {
+        let map = self.state.lock().unwrap();
+        let cap = f64::from(self.capacity);
+        let Some(entry) = map.get(key) else {
+            return Decision::Allowed;
+        };
+        let now = Instant::now();
+        let elapsed = now.duration_since(entry.last_refill).as_secs_f64();
+        let tokens = (entry.tokens + elapsed * self.refill_rate).min(cap);
+        if tokens >= 1.0 {
+            Decision::Allowed
+        } else {
+            let deficit = 1.0 - tokens;
+            let wait_secs = deficit / self.refill_rate;
+            Decision::Denied {
+                retry_after: Duration::from_secs_f64(wait_secs),
+            }
+        }
+    }
 }
 
 impl RateLimiter for TokenBucket {
@@ -248,6 +270,26 @@ impl SlidingWindow {
         map.retain(|_, v| now.duration_since(v.last_accessed) < max_age);
         before - map.len()
     }
+
+    /// Check what `check` would return for `key`, without recording the request or
+    /// creating per-key state for an unseen key.
+    pub fn peek(&self, key: &str) -> Decision {
+        let map = self.state.lock().unwrap();
+        let Some(entry) = map.get(key) else {
+            return Decision::Allowed;
+        };
+        let now = Instant::now();
+        let cutoff = now.checked_sub(self.window).unwrap_or(now);
+        let count = entry.timestamps.iter().filter(|t| **t > cutoff).count() as u32;
+        if count < self.max_requests {
+            Decision::Allowed
+        } else {
+            // First in-window timestamp determines when a slot opens.
+            let oldest = entry.timestamps.iter().find(|t| **t > cutoff).copied().unwrap_or(now);
+            let retry_after = self.window.saturating_sub(now.duration_since(oldest));
+            Decision::Denied { retry_after }
+        }
+    }
 }
 
 impl RateLimiter for SlidingWindow {
@@ -357,6 +399,27 @@ impl FixedWindow {
         map.retain(|_, v| now.duration_since(v.last_accessed) < max_age);
         before - map.len()
     }
+
+    /// Check what `check` would return for `key`, without incrementing the
+    /// counter or creating per-key state for an unseen key.
+    pub fn peek(&self, key: &str) -> Decision {
+        let map = self.state.lock().unwrap();
+        let Some(entry) = map.get(key) else {
+            return Decision::Allowed;
+        };
+        let now = Instant::now();
+        let elapsed = now.duration_since(entry.window_start);
+        if elapsed >= self.window {
+            // Window has expired — counter would be reset to 0.
+            return Decision::Allowed;
+        }
+        if entry.count < self.max_requests {
+            Decision::Allowed
+        } else {
+            let retry_after = self.window.saturating_sub(elapsed);
+            Decision::Denied { retry_after }
+        }
+    }
 }
 
 impl RateLimiter for FixedWindow {
@@ -388,6 +451,145 @@ impl RateLimiter for FixedWindow {
             let retry_after = self.window.saturating_sub(elapsed);
             self.denied.fetch_add(1, Ordering::Relaxed);
             Decision::Denied { retry_after }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LeakyBucket
+// ---------------------------------------------------------------------------
+
+struct LeakyBucketState {
+    level: f64,
+    last_update: Instant,
+    last_accessed: Instant,
+}
+
+/// A leaky bucket rate limiter.
+///
+/// Each key gets a bucket of fixed `capacity`. The level drains continuously
+/// at `leak_rate` units per second. Each `check` adds one unit; if the new
+/// level would exceed capacity, the request is denied.
+///
+/// Compared to [`TokenBucket`]: a leaky bucket emphasizes smoothing — bursts
+/// are absorbed but the steady throughput cannot exceed `leak_rate`.
+///
+/// # Examples
+///
+/// ```
+/// use philiprehberger_rate_limiter::{RateLimiter, LeakyBucket, Decision};
+///
+/// let limiter = LeakyBucket::new(5, 1.0); // capacity 5, leaks 1/sec
+/// assert!(matches!(limiter.check("k"), Decision::Allowed));
+/// ```
+pub struct LeakyBucket {
+    capacity: u32,
+    leak_rate: f64,
+    state: Mutex<HashMap<String, LeakyBucketState>>,
+    total_requests: AtomicU64,
+    allowed: AtomicU64,
+    denied: AtomicU64,
+}
+
+impl LeakyBucket {
+    /// Creates a new `LeakyBucket`.
+    ///
+    /// * `capacity` - Maximum level the bucket can hold.
+    /// * `leak_rate` - Units drained per second.
+    pub fn new(capacity: u32, leak_rate: f64) -> Self {
+        Self {
+            capacity,
+            leak_rate,
+            state: Mutex::new(HashMap::new()),
+            total_requests: AtomicU64::new(0),
+            allowed: AtomicU64::new(0),
+            denied: AtomicU64::new(0),
+        }
+    }
+
+    /// Returns observability statistics for this limiter.
+    pub fn stats(&self) -> RateLimiterStats {
+        let map = self.state.lock().unwrap();
+        RateLimiterStats {
+            total_requests: self.total_requests.load(Ordering::Relaxed),
+            allowed: self.allowed.load(Ordering::Relaxed),
+            denied: self.denied.load(Ordering::Relaxed),
+            active_keys: map.len(),
+        }
+    }
+
+    /// Removes the rate limit state for a specific key. Returns `true` if the
+    /// key existed.
+    pub fn reset_key(&self, key: &str) -> bool {
+        let mut map = self.state.lock().unwrap();
+        map.remove(key).is_some()
+    }
+
+    /// Removes keys that haven't been accessed within the given duration.
+    /// Returns the number of keys removed.
+    pub fn cleanup_inactive(&self, max_age: Duration) -> usize {
+        let mut map = self.state.lock().unwrap();
+        let now = Instant::now();
+        let before = map.len();
+        map.retain(|_, v| now.duration_since(v.last_accessed) < max_age);
+        before - map.len()
+    }
+
+    /// Check what `check` would return for `key`, without adding to the level
+    /// or creating per-key state for an unseen key.
+    pub fn peek(&self, key: &str) -> Decision {
+        let map = self.state.lock().unwrap();
+        let cap = f64::from(self.capacity);
+        let Some(entry) = map.get(key) else {
+            return Decision::Allowed;
+        };
+        let now = Instant::now();
+        let elapsed = now.duration_since(entry.last_update).as_secs_f64();
+        let level = (entry.level - elapsed * self.leak_rate).max(0.0);
+        if level + 1.0 <= cap {
+            Decision::Allowed
+        } else {
+            let overflow = (level + 1.0) - cap;
+            let wait_secs = overflow / self.leak_rate;
+            Decision::Denied {
+                retry_after: Duration::from_secs_f64(wait_secs),
+            }
+        }
+    }
+}
+
+impl RateLimiter for LeakyBucket {
+    fn check(&self, key: &str) -> Decision {
+        let mut map = self.state.lock().unwrap();
+        let now = Instant::now();
+        let cap = f64::from(self.capacity);
+
+        let entry = map.entry(key.to_owned()).or_insert(LeakyBucketState {
+            level: 0.0,
+            last_update: now,
+            last_accessed: now,
+        });
+
+        // Drain by elapsed * leak_rate.
+        let elapsed = now.duration_since(entry.last_update).as_secs_f64();
+        entry.level = (entry.level - elapsed * self.leak_rate).max(0.0);
+        entry.last_update = now;
+        entry.last_accessed = now;
+
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
+
+        if entry.level + 1.0 <= cap {
+            entry.level += 1.0;
+            self.allowed.fetch_add(1, Ordering::Relaxed);
+            Decision::Allowed
+        } else {
+            // Wait until enough has leaked so that level + 1 <= cap.
+            let overflow = (entry.level + 1.0) - cap;
+            let wait_secs = overflow / self.leak_rate;
+            self.denied.fetch_add(1, Ordering::Relaxed);
+            Decision::Denied {
+                retry_after: Duration::from_secs_f64(wait_secs),
+            }
         }
     }
 }
@@ -677,5 +879,126 @@ mod tests {
         limiter.check("a");
         let removed = limiter.cleanup_inactive(Duration::from_secs(60));
         assert_eq!(removed, 0);
+    }
+
+    // --- LeakyBucket tests ---
+
+    #[test]
+    fn leaky_bucket_allows_up_to_capacity() {
+        let limiter = LeakyBucket::new(3, 0.01); // very slow leak
+        assert_eq!(limiter.check("a"), Decision::Allowed);
+        assert_eq!(limiter.check("a"), Decision::Allowed);
+        assert_eq!(limiter.check("a"), Decision::Allowed);
+    }
+
+    #[test]
+    fn leaky_bucket_denies_when_full() {
+        let limiter = LeakyBucket::new(2, 0.01);
+        assert_eq!(limiter.check("a"), Decision::Allowed);
+        assert_eq!(limiter.check("a"), Decision::Allowed);
+        let result = limiter.check("a");
+        assert!(matches!(result, Decision::Denied { .. }));
+    }
+
+    #[test]
+    fn leaky_bucket_leaks_over_time() {
+        let limiter = LeakyBucket::new(1, 10.0); // leaks 10/sec
+        assert_eq!(limiter.check("a"), Decision::Allowed);
+        assert!(matches!(limiter.check("a"), Decision::Denied { .. }));
+
+        thread::sleep(Duration::from_millis(150));
+        assert_eq!(limiter.check("a"), Decision::Allowed);
+    }
+
+    #[test]
+    fn leaky_bucket_multiple_keys_independent() {
+        let limiter = LeakyBucket::new(1, 0.01);
+        assert_eq!(limiter.check("x"), Decision::Allowed);
+        assert!(matches!(limiter.check("x"), Decision::Denied { .. }));
+        assert_eq!(limiter.check("y"), Decision::Allowed);
+    }
+
+    #[test]
+    fn leaky_bucket_stats_tracks_allowed_and_denied() {
+        let limiter = LeakyBucket::new(1, 0.01);
+        limiter.check("a");
+        limiter.check("a"); // denied
+        let s = limiter.stats();
+        assert_eq!(s.total_requests, 2);
+        assert_eq!(s.allowed, 1);
+        assert_eq!(s.denied, 1);
+        assert_eq!(s.active_keys, 1);
+    }
+
+    #[test]
+    fn leaky_bucket_reset_key_clears_state() {
+        let limiter = LeakyBucket::new(1, 0.01);
+        limiter.check("a");
+        assert!(matches!(limiter.check("a"), Decision::Denied { .. }));
+        assert!(limiter.reset_key("a"));
+        assert_eq!(limiter.check("a"), Decision::Allowed);
+    }
+
+    #[test]
+    fn leaky_bucket_cleanup_removes_stale_keys() {
+        let limiter = LeakyBucket::new(5, 1.0);
+        limiter.check("old");
+        thread::sleep(Duration::from_millis(150));
+        limiter.check("new");
+        let removed = limiter.cleanup_inactive(Duration::from_millis(100));
+        assert_eq!(removed, 1);
+        assert_eq!(limiter.stats().active_keys, 1);
+    }
+
+    // --- peek tests ---
+
+    #[test]
+    fn token_bucket_peek_does_not_consume() {
+        let limiter = TokenBucket::new(1, 0.01);
+        // peek on an unseen key — should be Allowed and not create state
+        assert_eq!(limiter.peek("a"), Decision::Allowed);
+        assert_eq!(limiter.stats().active_keys, 0);
+
+        limiter.check("a"); // consume
+        // Now check is denied; peek should agree without mutating.
+        assert!(matches!(limiter.peek("a"), Decision::Denied { .. }));
+        assert!(matches!(limiter.peek("a"), Decision::Denied { .. }));
+
+        // peek hasn't consumed anything; check still denied.
+        assert!(matches!(limiter.check("a"), Decision::Denied { .. }));
+    }
+
+    #[test]
+    fn sliding_window_peek_does_not_record() {
+        let limiter = SlidingWindow::new(Duration::from_secs(10), 1);
+        assert_eq!(limiter.peek("a"), Decision::Allowed);
+        assert_eq!(limiter.stats().active_keys, 0);
+
+        limiter.check("a");
+        assert!(matches!(limiter.peek("a"), Decision::Denied { .. }));
+        // peek did not record, so check is still denied (count is 1, peek didn't add to it)
+        assert!(matches!(limiter.check("a"), Decision::Denied { .. }));
+    }
+
+    #[test]
+    fn fixed_window_peek_does_not_increment() {
+        let limiter = FixedWindow::new(Duration::from_secs(10), 1);
+        assert_eq!(limiter.peek("a"), Decision::Allowed);
+        assert_eq!(limiter.stats().active_keys, 0);
+
+        limiter.check("a");
+        assert!(matches!(limiter.peek("a"), Decision::Denied { .. }));
+        assert!(matches!(limiter.check("a"), Decision::Denied { .. }));
+    }
+
+    #[test]
+    fn leaky_bucket_peek_does_not_add() {
+        let limiter = LeakyBucket::new(1, 0.01);
+        assert_eq!(limiter.peek("a"), Decision::Allowed);
+        assert_eq!(limiter.stats().active_keys, 0);
+
+        limiter.check("a");
+        assert!(matches!(limiter.peek("a"), Decision::Denied { .. }));
+        assert!(matches!(limiter.check("a"), Decision::Denied { .. }));
     }
 }

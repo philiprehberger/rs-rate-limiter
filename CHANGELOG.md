@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 (2026-05-30)
+
+- Add `LeakyBucket` rate limiter (4th algorithm)
+- Add `peek` method on all four limiters for non-consuming checks
+- Add `package-card.webp` reference to README
+- Sync README install snippet version with Cargo.toml
+
 ## 0.2.3 (2026-03-31)
 
 - Standardize README to 3-badge format with emoji Support section
